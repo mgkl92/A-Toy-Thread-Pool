@@ -3,7 +3,7 @@
 #include "thread_pool.h"
 
 namespace mgkl {
-ThreadPool::ThreadPool(uint nthreads) : m_running_{false} {
+ThreadPool::ThreadPool(uint nthreads) : m_running_{true}, m_ready_cnt_{0} {
   assert(nthreads > 0 && "invalid parameter!");
   nthreads = std::min(nthreads, std::thread::hardware_concurrency());
 
@@ -11,10 +11,15 @@ ThreadPool::ThreadPool(uint nthreads) : m_running_{false} {
     m_threads_.emplace_back(std::bind(&ThreadPool::worker, this));
   }
 
-  m_running_ = true;
+  // waiting for all worker threads to be ready
+  while (m_ready_cnt_.load() < nthreads) {
+    std::this_thread::yield();
+  }
 }
 
 void ThreadPool::worker() {
+  m_ready_cnt_++;
+
   while (true) {
     std::function<void()> task;
 
@@ -50,15 +55,15 @@ ThreadPool::~ThreadPool() {
 
 template <typename Func, typename... Args>
 auto ThreadPool::submit(Func&& f, Args&&... args)
-    -> std::future<typename std::result_of<Func(Args...)>::type> {
-  using return_type = typename std::result_of<Func(Args...)>::type;
+    -> std::future<result_of_t<Func, Args...>> {
+  using return_type = result_of_t<Func, Args...>;
   auto task_ptr = std::make_shared<std::packaged_task<return_type()>>(
       std::bind(std::forward<Func>(f), std::forward<Args>(args)...));
   auto res = task_ptr->get_future();
   {
     std::unique_lock<std::mutex> lock(m_mtx_);
     if (!m_running_) {
-      return {};
+      return res;
     } else {
       m_tasks_.push([task_ptr]() { (*task_ptr)(); });
     }
